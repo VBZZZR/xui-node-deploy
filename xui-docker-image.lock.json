@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "platform": "linux/amd64",
+  "image": "ghcr.io/mhsanaei/3x-ui@sha256:3b3131f1876e6bf35063a9ec4dd1c594e4525180bfc2e1c477dcc8a3c9550ca1",
+  "xuiVersion": "3.7.0",
+  "xrayVersion": "26.7.28",
+  "archiveSha256": "0f8dd7baef3458f6591574e24814f322cf7f5e1e27f0a594683745e50be84ec5",
+  "xuiSha256": "4738190332c5480ec96fd72e10a21157ee4bcf91c240a9b4b061d14f15092298",
+  "xraySha256": "64d46afb80adea1bf97a0d467e83f4a9ac1ebd0995891e84bca3f1a1d1affb1d"
+}

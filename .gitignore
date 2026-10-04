@@ -1,0 +1,25 @@
+# Never commit runtime databases, credentials, logs or local state.
+.env
+.env.*
+*.env
+*.db
+*.db-*
+*.sqlite*
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+*.log
+*.bak*
+config.json
+deploy-result.env
+bootstrap-admin-*
+node-sync-token
+release-v*/
+state/
+db/
+logs/
+runtime/
+__pycache__/
+.download.*/
+# xui-docker-image.lock.json may be committed after export/inspection.
