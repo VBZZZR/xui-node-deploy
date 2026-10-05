@@ -1,158 +1,146 @@
-# Быстрое развёртывание узлов 3x-ui через GitHub
+# Установка нового узла
 
-Редакция от 4 октября 2026. Чистая **Ubuntu 24.04 LTS x86_64**, 3x-ui **3.7.0**, Xray **26.7.28**, Docker Compose, Google REALITY на TCP/443.
+## 1. Подготовьте VPS
 
-Один раз загрузите этот комплект в свой публичный репозиторий. Затем на каждом новом VPS достаточно SSH-входа и одного блока запуска ниже: скачивать архив на Windows и передавать его через scp больше не требуется.
+- Чистая Ubuntu 24.04 x86_64.
+- A-запись нового домена указывает на IPv4 VPS; ошибочной AAAA-записи нет.
+- Имя узла и домен свободны в основной панели.
+- В firewall провайдера разрешены действующий SSH-порт, `80/tcp` и `443/tcp`. Порт панели откройте, когда установщик его покажет.
 
-Установщик запрашивает персональные параметры в терминале. Email и адрес основной панели сохраняются только на узле в файле состояния с правами 600; API-токен основной панели читается скрыто после теста Happ. На GitHub размещается код, а не данные работающих серверов.
+## 2. Создайте GitHub-токен для загрузки
 
-## 1. Один раз создайте репозиторий
+Откройте [создание fine-grained токена](https://github.com/settings/personal-access-tokens/new) и выберите:
 
-1. Откройте [создание репозитория GitHub](https://github.com/new?name=xui-node-deploy&visibility=public).
-2. Имя: `xui-node-deploy`. Видимость: **Public — публичный**. Для этой схемы скачивания GitHub-токен на VPS не нужен. Включать автоматическое создание README не требуется: он есть в комплекте.
-3. Распакуйте подготовленный ZIP на Windows. Загрузите **содержимое папки**, чтобы `install.sh` и `xui-node-docker.sh` находились прямо в корне репозитория. Не загружайте ZIP одним файлом.
-4. В GitHub используйте **Add file → Upload files — Добавить файл → Загрузить файлы** и сохраните коммит в ветке **main**. В пустом репозитории ссылка может называться **uploading an existing file — загрузить существующий файл**.
+- **Token name — имя:** `xui-deploy-read`.
+- **Expiration — срок:** 30 дней.
+- **Resource owner — владелец:** `VBZZZR`.
+- **Repository access — доступ:** `Only select repositories` → `xui-node-deploy`.
+- **Repository permissions — права:** `Contents` → `Read-only`.
 
-В комплекте: `install.sh`, `xui-node-docker.sh`, `README.md`, `test-xui-node-docker.sh`, `SHA256SUMS.txt`, `.gitignore`, `.gitattributes`. Все файлы уже содержат нужные переводы строк LF; не пересохраняйте Bash-файлы как CRLF.
+Нажмите **Generate token — создать токен**. Сохраните его в менеджере паролей: он потребуется в шаге 4 и на следующих VPS до истечения срока.
 
-Используйте именно этот обезличенный комплект. Прежний персональный архив содержал email и полный адрес основной панели. Базы `.db`, `config.json` с работающего VPS, `deploy-result.env`, приватные SSH/REALITY-ключи, сертификатные ключи и токены в репозиторий не загружайте. `.gitignore` помогает при работе через Git, но не проверяет файлы, вручную загружаемые в браузере.
+## 3. Войдите на VPS
 
-Инструкции GitHub: [создание репозитория](https://docs.github.com/en/repositories/creating-and-managing-repositories/creating-a-new-repository), [загрузка файлов](https://docs.github.com/en/repositories/working-with-files/managing-files/adding-a-file-to-a-repository).
+**PowerShell на Windows:**
 
-## 2. Один раз добавьте проверенный образ с US1
-
-Это позволит всем следующим VPS использовать тот же Docker-образ. **В SSH-терминале работающего US1**:
-
-```bash
-sudo bash /root/xui-node-docker.sh --image-lock
+```powershell
+$ServerIp = (Read-Host "IPv4 VPS").Trim()
+$SshPort = (Read-Host "Порт SSH; Enter для 22").Trim()
+if (-not $SshPort) { $SshPort = "22" }
+ssh.exe -p "$SshPort" "root@$ServerIp"
 ```
 
-Скопируйте только выведенный JSON. В GitHub выберите **Add file → Create new file — Добавить файл → Создать файл**, имя — `xui-docker-image.lock.json`. Вставьте JSON и сохраните в `main`. Экспорт содержит digest, версии и контрольные суммы; пароль панели, клиентов и токенов в нём нет.
+Для первого подключения сверьте отпечаток ключа сервера через консоль провайдера. В ней выполните:
 
-Не загружайте вместо него `/var/lib/xui-node-docker/config.json`: это другой файл с приватными данными. Image-lock можно публиковать только после экспорта указанной командой и просмотра его содержимого.
+```bash
+ssh-keygen -E sha256 -lf /etc/ssh/ssh_host_ed25519_key.pub
+```
 
-Без общего image-lock первая установка загрузит официальный тег `3.7.0`, проверит версии и зафиксирует полученный digest на новом сервере. Совпадение образа с US1 в этом случае не гарантируется. Фактического image-lock US1 в подготовленном архиве нет — он доступен только на вашем сервере.
+## 4. Запустите установку
 
-## 3. На каждом новом VPS
-
-Подготовьте чистую Ubuntu 24.04 x86_64, действующий SSH-доступ и A-запись домена, указывающую на публичный IPv4 нового сервера. Нужны свободные TCP/80 и TCP/443. Неверной AAAA-записи у домена быть не должно. Имя узла и домен должны отличаться от уже существующих записей основной панели.
-
-Войдите по SSH. На VPS потребуется root или пользователь с sudo. Подготовьте адрес основной панели с портом и basePath, email для сертификата, страну, имя нового узла и временный admin-токен основной панели. Имя инбаунда формируется автоматически: например, `🇺🇸 US1` или `🇩🇪 DE1`.
-
-**В терминал нового VPS копируйте весь блок.** Он запросит только репозиторий вида `ваш-логин/xui-node-deploy`, затем запустит интерактивный установщик:
+**SSH-терминал VPS под root — весь блок целиком:**
 
 ```bash
 (
+    set +x
+    set +a
     set -euo pipefail
-    read -r -p 'Репозиторий GitHub (логин/xui-node-deploy): ' repo
-    [[ "$repo" =~ ^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || { printf 'Неверный формат репозитория.\n' >&2; exit 2; }
-    if ! command -v curl >/dev/null; then
-        if (( EUID == 0 )); then
-            apt-get update
-            apt-get install -y curl ca-certificates
-        else
-            sudo apt-get update
-            sudo apt-get install -y curl ca-certificates
-        fi
+    umask 077
+    (( EUID == 0 )) || { printf 'Сначала выполните sudo -i.\n' >&2; exit 1; }
+
+    if ! command -v curl >/dev/null 2>&1; then
+        apt-get update
+        apt-get install -y curl ca-certificates
     fi
-    bootstrap=$(mktemp /tmp/xui-github-bootstrap.XXXXXX)
-    trap 'rm -f -- "$bootstrap"' EXIT
-    curl --disable --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --connect-timeout 15 --max-time 120 "https://raw.githubusercontent.com/${repo}/main/install.sh" --output "$bootstrap"
-    printf '%s  %s\n' '95a2a601271d25310e230f48b19b320ca1ca8ba2cb7f0e173c88c16cc8cfcc9a' "$bootstrap" | sha256sum --check --status
-    bash "$bootstrap" "$repo"
+
+    bootstrap=$(mktemp /tmp/xui-bootstrap.XXXXXX)
+    trap 'unset github_read_token; exec 3<&-; rm -f -- "$bootstrap"' EXIT
+    unset github_read_token
+    IFS= read -r -s -p 'GitHub-токен из шага 2: ' github_read_token
+    printf '\n'
+    [[ "$github_read_token" =~ ^[A-Za-z0-9_]+$ ]] || { printf 'Некорректный токен.\n' >&2; exit 1; }
+
+    curl --disable --fail --silent --show-error --location \
+        --proto '=https' --proto-redir '=https' \
+        --connect-timeout 15 --max-time 120 --retry 2 \
+        --header 'Accept: application/vnd.github.raw+json' \
+        --header 'X-GitHub-Api-Version: 2026-03-10' \
+        --header @/dev/fd/3 \
+        'https://api.github.com/repos/VBZZZR/xui-node-deploy/contents/install.sh?ref=main' \
+        --output "$bootstrap" \
+        3< <(printf 'Authorization: Bearer %s\n' "$github_read_token")
+
+    printf '%s  %s\n' \
+        'a72fd171e338831204262947ade6fb829d5027bd028acf2ae3512a1c68117d14' \
+        "$bootstrap" | sha256sum --check --status
+
+    exec 3< <(printf '%s\n' "$github_read_token")
+    unset github_read_token
+    bash "$bootstrap" VBZZZR/xui-node-deploy
 )
 ```
 
-Загрузчик проверяет свой SHA-256 из этого блока, затем SHA-256 основного установщика. При несовпадении запуск прекращается. Он автоматически ищет `xui-docker-image.lock.json` в том же репозитории; только HTTP 404 означает отсутствие необязательного файла, остальные ошибки останавливают запуск.
+## 5. Ответьте на запросы установщика
 
-Установщик сохраняется в `~/xui-node-deploy/xui-node-docker.sh`. Повторная загрузка изменённого файла сохраняет резервную копию прежнего. После изменения кода опубликованного комплекта контрольные суммы в загрузчике, README и `SHA256SUMS.txt` нужно обновить согласованно. Поэтому устаревший блок запуска не выполнит незаметно изменившийся файл из `main`.
+| Запрос | Что сделать |
+|---|---|
+| Домен, страна, короткое имя узла | Введите параметры нового VPS, например код страны `US` и имя `US1` |
+| Порт панели и внешний firewall | Разрешите показанный порт панели у провайдера; введите `ОТКРЫТО` |
+| Второй вход по SSH | Откройте другое окно PowerShell, повторите блок шага 3; при успешном входе в установщике введите `SSH-OK` |
+| Email для сертификата | Введите свой email |
+| QR-код / VLESS-ссылка | Добавьте тестовый профиль в Happ на Windows, проверьте сайты и внешний IPv4 |
+| Успешный тест Happ | Введите `1`, нажмите Enter, затем укажите внешний IPv4, показанный через VPN |
+| Неуспешный тест Happ | Введите `2`; исправьте ошибку и продолжите командой ниже |
+| Адрес основной панели | Введите полный HTTPS URL с портом и basePath |
+| API-токен основной панели | Введите временный токен основной панели с областью `admin` |
 
-## 4. Ответы по ходу установки
+Когда тестовый клиент будет отключён, отключите его профиль / VPN в Happ.
 
-Скрипт выполняет установку пакетов, настройку swap, UFW, Certbot, Docker, Fail2ban, панели и REALITY. Подтверждения остаются интерактивными:
-
-| Запрос | Действие |
-| --- | --- |
-| Требуется перезагрузка Ubuntu | Скрипт остановится. Выполните `sudo reboot`, войдите снова и используйте команду продолжения ниже |
-| Домен, страна, короткое имя узла | Например, ваш домен, `US`, `US1` |
-| Внешний firewall | Разрешите указанные скриптом TCP-порты в кабинете провайдера; затем введите `ОТКРЫТО` |
-| Второе SSH-подключение | Откройте вторую сессию и подтвердите успешный вход ответом `SSH-OK` |
-| Email для сертификата | Введите свой email; при продолжении он берётся из локального состояния |
-| QR-код и тест Happ Windows | Проверьте сайты и внешний IPv4. Успех: `1`, Enter, затем IPv4. Неуспех: `2` |
-| Адрес основной панели | Введите полный HTTPS URL с портом и basePath; окончание `/panel/nodes` допускается |
-| API-токен основной панели | Вставьте временный токен с областью `admin`; ввод скрыт |
-
-Существующие клиенты не присоединяются массово. Создаётся один тестовый клиент: 4 часа, 5 GiB, 3 IP. После успешного теста он сохраняется отключённым. Отключите его профиль/TUN в Happ, чтобы продолжить пользоваться интернетом через обычное подключение. Поля `minClientVer/maxClientVer` не задаются; встроенный минимум самого Xray проверяется реальным тестом Happ.
-
-После перезагрузки или исправления ошибки **на том же VPS, под тем же SSH-пользователем**:
+Если установщик требует перезагрузку, выполните на VPS:
 
 ```bash
-sudo bash ~/xui-node-deploy/xui-node-docker.sh
+sudo reboot
 ```
 
-Если файл ранее скачивали под root, а сейчас вошли другим пользователем, используйте напечатанный при первой загрузке абсолютный путь, например `/root/xui-node-deploy/xui-node-docker.sh`. Повторно скачивать файл для продолжения не требуется. После успешной регистрации повторный запуск проверит существующее состояние.
-
-## 5. Проверка портов
-
-Команды выполняются **во второй SSH-сессии**, когда первая ждёт ответа:
+После перезагрузки повторите SSH-вход из шага 3. **На том же VPS** продолжите:
 
 ```bash
+sudo bash /root/xui-node-deploy/xui-node-docker.sh
+```
+
+## 6. Проверьте результат
+
+**SSH-терминал VPS:**
+
+```bash
+sudo bash /root/xui-node-deploy/xui-node-docker.sh --status
+sudo bash /root/xui-node-deploy/xui-node-docker.sh --validate
 sudo ufw status verbose
 sudo ss -lntp
 ```
 
-В UFW должны быть разрешения фактического SSH, TCP/80, TCP/443 и случайного порта HTTPS-панели. `ss` показывает слушающие службы. До запуска панели/REALITY этих портов в нём может не быть. TCP/80 слушается Certbot только при выпуске и продлении сертификата.
+Ожидаются `registered: yes`, `client_test_verified: yes`, `bootstrap_cleanup_verified: yes`, `image_pin: OK`, работающий контейнер, TCP/443 и отключённый тестовый клиент (`enable=0`).
 
-После появления QR-кода проверьте доступ с Windows. **Отдельное окно PowerShell**:
+**В другом окне PowerShell — внешняя проверка портов:**
 
 ```powershell
-& {
-    $ServerIp = (Read-Host 'IPv4 нового VPS').Trim()
-    $SshPort = [int](Read-Host 'Действующий SSH-порт')
-    $PanelPort = [int](Read-Host 'Порт панели из вывода установщика')
-    foreach ($Port in @($SshPort, 80, 443, $PanelPort)) {
-        $Result = Test-NetConnection -ComputerName $ServerIp -Port $Port -WarningAction SilentlyContinue
-        [pscustomobject]@{ Port=$Port; TcpConnected=$Result.TcpTestSucceeded }
-    }
+$ServerIp = (Read-Host "IPv4 VPS").Trim()
+$SshPort = [int](Read-Host "Действующий порт SSH")
+$PanelPort = [int](Read-Host "Порт панели из установщика")
+foreach ($Port in @($SshPort, 443, $PanelPort) | Select-Object -Unique) {
+    Test-NetConnection -ComputerName $ServerIp -Port $Port |
+        Select-Object ComputerName, RemotePort, TcpTestSucceeded
 }
 ```
 
-Для SSH, TCP/443 и панели ожидается `True` после запуска соответствующих служб. Для TCP/80 вне работы Certbot допустимо `False`. Отсутствие TCP-соединения само по себе не определяет причину: проверяйте слушатель, UFW и firewall провайдера. Проверка с Windows не заменяет встроенную проверку доступности узла с основной панели.
+Для этих портов ожидается `TcpTestSucceeded: True`. TCP/80 проверяется во время получения сертификата; после завершения на нём может не быть слушателя.
 
-## 6. Финальная проверка
+В основной панели проверьте статус узла `online` и отзовите только временный токен установки, например `deploy-US1`.
 
-После сообщения о завершении, **на новом VPS**:
-
-```bash
-sudo bash ~/xui-node-deploy/xui-node-docker.sh --status
-sudo bash ~/xui-node-deploy/xui-node-docker.sh --validate
-```
-
-Ожидается: `registered: yes`, `client_test_verified: yes`, `bootstrap_cleanup_verified: yes`, контейнер `running`, `image_pin: OK`, TCP/443 слушается; тестовый клиент `enable=0`. После этих проверок временный токен типа `deploy-US1` можно отозвать в основной панели. Токен бота и токен узла `node-sync` сохраняйте.
-
-Ошибка о совпадающем узле означает совпадение имени или домена с существующей записью. Сначала выясните её назначение; удаление действующего узла не является стандартным шагом установки.
-
-Диагностика после остановки установщика:
+Если установка остановилась, **на VPS** выполните:
 
 ```bash
-sudo bash ~/xui-node-deploy/xui-node-docker.sh --diagnose
+sudo bash /root/xui-node-deploy/xui-node-docker.sh --diagnose
 ```
 
-Команда напечатает путь отчёта. Пароли, API-токены, приватные ключи и полные клиентские ссылки в чат или GitHub Issues не отправляйте.
-
-## Проверенность и состав
-
-Базовая Docker-установка с исправленным запросом Google проверена на US1, включая Happ, регистрацию и `--validate`. В этой GitHub-редакции отдельно проверены синтаксис Bash, запрос и сохранение персональных параметров, нормализация URL, загрузка с правильным SHA-256 и отказ при повреждённом файле. Сетевые ответы загрузчика в тестах имитировались. Реальная загрузка из вашего ещё не созданного репозитория и полный прогон этой редакции на чистом VPS пока не выполнены.
-
-Версии 3x-ui/Xray и их SHA-256 сохранены. Автообновление этих компонентов и автоматическая перезагрузка не добавлены. Сертификаты/ключи/база генерируются отдельно для каждого узла. GitHub-загрузчик не настраивает DNS или firewall в кабинете провайдера.
-
-Разработческая проверка в распакованном каталоге, нужны Bash, Python 3 и jq:
-
-```bash
-bash -n install.sh
-bash -n xui-node-docker.sh
-bash test-xui-node-docker.sh --regressions
-sha256sum --check SHA256SUMS.txt
-```
-
-Полные режимы тестов требуют оригинальных проверенных бинарников 3x-ui/Xray. `--regressions` их не запускает и сообщает об этом строкой `SKIP`. Установка контейнера выполняется только основным установщиком после запуска без этого тестового флага.
+Для следующего VPS повторите шаги 1 и 3–6; действующий GitHub-токен из шага 2 можно использовать повторно.
