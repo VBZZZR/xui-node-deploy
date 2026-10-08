@@ -17,7 +17,7 @@ command -v curl >/dev/null || {
     exit 2
 }
 
-readonly EXPECTED_SCRIPT_SHA256='ed8c7f96c8080a8b99f685d279c3493b23c705e264deac521f2fc18564744658'
+readonly EXPECTED_SCRIPT_SHA256='03f068ccc260573ec0532b4dfaaf1dc89408448d1bcf52b4519d515b5aef1e28'
 readonly EXPECTED_IMAGE_LOCK_SHA256='04c7471a08525fdd1c4679f89150a802c6160285794819b3e7798bd6de1587b0'
 readonly base="https://api.github.com/repos/${repo}/contents"
 readonly target_dir="${XUI_INSTALL_DIR:-$HOME/xui-node-deploy}"

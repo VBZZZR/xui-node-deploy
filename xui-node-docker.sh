@@ -968,6 +968,7 @@ build_inbound_payload() {
             }],
             decryption:"none",
             encryption:"none",
+            testseed:[],
             fallbacks:[]
           },
           streamSettings:{
@@ -980,18 +981,21 @@ build_inbound_payload() {
               target:$target,
               serverNames:[$sni],
               privateKey:$privateKey,
+              maxTimeDiff:0,
               shortIds:[$shortId],
+              mldsa65Seed:"",
               settings:{
                 publicKey:$publicKey,
-                fingerprint:"chrome",
+                fingerprint:"firefox",
                 serverName:"",
-                spiderX:$spiderX
+                spiderX:$spiderX,
+                mldsa65Verify:""
               }
             }
           },
           sniffing:{
             enabled:true,
-            destOverride:["http","tls","quic"],
+            destOverride:["http","tls","fakedns"],
             metadataOnly:false,
             routeOnly:false
           }

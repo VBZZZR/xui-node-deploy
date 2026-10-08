@@ -103,12 +103,22 @@ PY
 
 (
     # The visible name follows any country/name; the sync tag stays unchanged.
-    for label in '🇺🇸 US1' '🇩🇪 DE2'; do
+    for label in '🇺🇸 US1' '🇩🇪 DE2' '🇱🇻 LV1'; do
         cfg_set_string displayName "$label"
         build_inbound_payload "${TEST_ROOT}/remark.json" synthetic-private synthetic-public synthetic-uuid 0123456789abcdef 1893456000000 /test
         jq -e --arg label "$label" '.remark==$label and .tag=="in-443-tcp" and .port==443' "${TEST_ROOT}/remark.json" >/dev/null || fail_test "inbound remark does not follow displayName"
     done
     cfg_set_string displayName '🇺🇸 US1'
+)
+
+(
+    # The LV1 export masked optional seeds even when empty. Do not silently
+    # activate custom Vision seeds or ML-DSA from export placeholders.
+    build_inbound_payload "${TEST_ROOT}/lv1-profile.json" synthetic-private synthetic-public synthetic-uuid 0123456789abcdef 1893456000000 /test
+    assert_jq '.settings.testseed == [] and (.settings.clients | length == 1) and .settings.clients[0].flow == "xtls-rprx-vision"' "${TEST_ROOT}/lv1-profile.json" "optional seeds or test clients changed"
+    assert_jq '.streamSettings.realitySettings | .settings.fingerprint == "firefox" and .maxTimeDiff == 0 and .mldsa65Seed == "" and .settings.mldsa65Verify == "" and (has("minClientVer")|not) and (has("maxClientVer")|not)' "${TEST_ROOT}/lv1-profile.json" "LV1 REALITY profile differs"
+    assert_jq '.sniffing.enabled == true and .sniffing.destOverride == ["http","tls","fakedns"]' "${TEST_ROOT}/lv1-profile.json" "LV1 sniffing differs"
+    assert_jq '[.. | strings | select(contains("<GENERATE_NEW>"))] | length == 0' "${TEST_ROOT}/lv1-profile.json" "masked export placeholder leaked into payload"
 )
 
 (
@@ -140,7 +150,7 @@ PY
     [[ "$(cfg_get '.mainPanelBase')" == 'https://panel.example.com:42173/example' ]] || fail_test "panel URL not persisted"
     ensure_main_panel_base </dev/null
 )
-printf 'PASS: REALITY form, default JSON, token pipe, inbound names, SSH/X11 and personal configuration checks.\n'
+printf 'PASS: REALITY form, default JSON, token pipe, inbound names, LV1 profile, SSH/X11 and personal configuration checks.\n'
 if [[ "$TEST_MODE" == --regressions ]]; then
     bash -n "${SCRIPT_DIR}/xui-node-docker.sh"
     printf 'SKIP: real Xray/pinned binary and full deployment checks (--regressions).\n'

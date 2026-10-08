@@ -1,5 +1,7 @@
 # Установка нового узла
 
+Шаблон новых узлов: VLESS/TCP/443 + REALITY, Google, fingerprint `firefox`, sniffing `http`, `tls`, `fakedns`. Имя inbound — флаг и имя нового узла; тег синхронизации — `in-443-tcp`. Ключи, UUID, shortId и spiderX создаются заново. Поля `minClientVer/maxClientVer` отсутствуют. Дополнительные `testseed` и ML-DSA выключены: экспорт LV1 скрыл их исходные значения. Обновление шаблона применяется при создании inbound на новом VPS.
+
 ## 1. Подготовьте VPS
 
 - Чистая Ubuntu 24.04 x86_64.
@@ -376,7 +378,7 @@ active
         3< <(printf 'Authorization: Bearer %s\n' "$github_read_token")
 
     printf '%s  %s\n' \
-        'a72fd171e338831204262947ade6fb829d5027bd028acf2ae3512a1c68117d14' \
+        'e2c2ac3e5600fa28da02bdbb0d965a505b429de5952a4ed7c1fe551805b09923' \
         "$bootstrap" | sha256sum --check --status
 
     exec 3< <(printf '%s\n' "$github_read_token")
