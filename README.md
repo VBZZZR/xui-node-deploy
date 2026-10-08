@@ -363,9 +363,15 @@ active
     bootstrap=$(mktemp /tmp/xui-bootstrap.XXXXXX)
     trap 'unset github_read_token; exec 3<&-; rm -f -- "$bootstrap"' EXIT
     unset github_read_token
-    IFS= read -r -s -p 'GitHub-токен из шага 2: ' github_read_token
+    if ! IFS= read -r -s -p 'GitHub-токен из шага 2: ' github_read_token; then
+        printf '\n[ERROR] Ввод токена прерван.\n' >&2
+        exit 1
+    fi
     printf '\n'
-    [[ "$github_read_token" =~ ^[A-Za-z0-9_]+$ ]] || { printf 'Некорректный токен.\n' >&2; exit 1; }
+    [[ "$github_read_token" =~ ^[A-Za-z0-9_]+$ ]] || {
+        printf '[ERROR] Токен пуст или содержит недопустимые символы.\n' >&2
+        exit 1
+    }
 
     curl --disable --fail --silent --show-error --location \
         --proto '=https' --proto-redir '=https' \
@@ -375,17 +381,25 @@ active
         --header @/dev/fd/3 \
         'https://api.github.com/repos/VBZZZR/xui-node-deploy/contents/install.sh?ref=main' \
         --output "$bootstrap" \
-        3< <(printf 'Authorization: Bearer %s\n' "$github_read_token")
+        3< <(printf 'Authorization: Bearer %s\n' "$github_read_token") || {
+        printf '[ERROR] Загрузка не удалась. Проверьте доступ GitHub-токена к репозиторию.\n' >&2
+        exit 1
+    }
 
-    printf '%s  %s\n' \
+    if ! printf '%s  %s\n' \
         'e2c2ac3e5600fa28da02bdbb0d965a505b429de5952a4ed7c1fe551805b09923' \
-        "$bootstrap" | sha256sum --check --status
+        "$bootstrap" | sha256sum --check; then
+        printf '[ERROR] SHA-256 загрузчика не совпала. Установка остановлена.\n' >&2
+        exit 1
+    fi
 
     exec 3< <(printf '%s\n' "$github_read_token")
     unset github_read_token
     bash "$bootstrap" VBZZZR/xui-node-deploy
 )
 ```
+
+После запроса вставьте GitHub-токен и нажмите Enter; символы не отображаются. Ожидается сообщение `OK`, затем запуск установщика. Если проверка SHA-256 не прошла, возьмите весь блок из текущего README в ветке `main`: сохранённый ранее блок может содержать старую контрольную сумму. Ошибка на этом этапе относится к загрузчику, а не к API основной панели.
 
 ## 5. Ответьте на запросы установщика
 

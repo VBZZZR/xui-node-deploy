@@ -109,7 +109,7 @@ def run_case(name, *, error_file=None, status="401", corrupt=None, token=TOKEN, 
         print("PASS", name)
 
 
-def check_readme_bootstrap():
+def check_readme_bootstrap(case="success"):
     blocks = re.findall(r"```bash\n(.*?)\n```", (ROOT / "README.md").read_text(), re.S)
     for index, block in enumerate(blocks):
         subprocess.run(["bash", "-n"], input=block, text=True, check=True)
@@ -122,6 +122,25 @@ def check_readme_bootstrap():
     with tempfile.TemporaryDirectory(prefix="xui-private-readme-") as temporary:
         directory = Path(temporary)
         env = environment(directory)
+        reply = TOKEN.encode() + b"\n"
+        expected_error = None
+        if case == "bootstrap-403":
+            env.update(MOCK_FAILURE_FILE="install.sh", MOCK_HTTP_CODE="403")
+            expected_error = "[ERROR] Загрузка не удалась."
+        elif case == "bootstrap-corrupt":
+            env["MOCK_CORRUPT_FILE"] = "install.sh"
+            expected_error = "[ERROR] SHA-256 загрузчика не совпала."
+        elif case == "stale-readme-hash":
+            bootstrap = bootstrap.replace(expected, "0" * 64)
+            expected_error = "[ERROR] SHA-256 загрузчика не совпала."
+        elif case == "empty-token":
+            reply = b"\n"
+            expected_error = "[ERROR] Токен пуст или содержит недопустимые символы."
+        elif case == "input-eof":
+            reply = b"\x04"
+            expected_error = "[ERROR] Ввод токена прерван."
+        else:
+            assert case == "success", case
         master, slave = pty.openpty()
         process = subprocess.Popen(["bash", "-c", bootstrap], stdin=slave, stdout=slave, stderr=slave, env=env)
         os.close(slave)
@@ -140,23 +159,35 @@ def check_readme_bootstrap():
                         break
                     output.extend(data)
                     if not sent and "GitHub-токен из шага 2".encode() in output:
-                        os.write(master, TOKEN.encode() + b"\n")
+                        os.write(master, reply)
                         sent = True
                 if process.poll() is not None and not ready:
                     break
             assert sent, "No hidden token prompt"
-            assert process.wait(timeout=2) == 0, output.decode(errors="replace")
-            result = subprocess.CompletedProcess([], 0, output.decode(errors="replace"), "")
+            code = process.wait(timeout=2)
+            text = output.decode(errors="replace")
+            if expected_error is None:
+                assert code == 0, text
+            else:
+                assert code != 0, text
+                assert expected_error in text, text
+                assert not (directory / "downloads" / "xui-node-docker.sh").exists(), "Started installer after failed bootstrap"
+            result = subprocess.CompletedProcess([], code, text, "")
             assert_no_secret(directory, result)
-            requests = [json.loads(line)["file"] for line in (directory / "requests.jsonl").read_text().splitlines()]
-            assert requests == ["install.sh", "xui-node-docker.sh", "xui-docker-image.lock.json"]
+            log = directory / "requests.jsonl"
+            requests = [json.loads(line)["file"] for line in log.read_text().splitlines()] if log.exists() else []
+            wanted = [] if case in ("empty-token", "input-eof") else ["install.sh"]
+            if expected_error is None:
+                wanted += ["xui-node-docker.sh", "xui-docker-image.lock.json"]
+            assert requests == wanted, requests
         finally:
             if process.poll() is None:
                 process.kill()
                 process.wait()
             os.close(master)
-    print("PASS README hidden prompt, token handoff and full download chain")
-    print("PASS", len(blocks), "README Bash blocks")
+    print("PASS README", case, "hidden prompt, safe errors and download gate")
+    if case == "success":
+        print("PASS", len(blocks), "README Bash blocks")
 
 
 if __name__ == "__main__":
@@ -168,4 +199,5 @@ if __name__ == "__main__":
     run_case("damaged installer stops", corrupt="xui-node-docker.sh", old_files=True)
     run_case("damaged image-lock stops", corrupt="xui-docker-image.lock.json", old_files=True)
     run_case("invalid token stops before requests", token="bad token")
-    check_readme_bootstrap()
+    for case in ("success", "bootstrap-403", "bootstrap-corrupt", "stale-readme-hash", "empty-token", "input-eof"):
+        check_readme_bootstrap(case)
