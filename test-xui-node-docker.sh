@@ -150,6 +150,200 @@ PY
     [[ "$(cfg_get '.mainPanelBase')" == 'https://panel.example.com:42173/example' ]] || fail_test "panel URL not persisted"
     ensure_main_panel_base </dev/null
 )
+(
+    trap - ERR
+    token_fixture='Aa0Bb1Cc2Dd3Ee4Ff5Gg6Hh7Ii8Jj9Kk0Ll1Mm2Nn3Oo4Pp5'
+    [[ ${#token_fixture} == 48 ]] || fail_test 'token fixture must match 3x-ui 3.7.0 length'
+    for token_input in \
+        "$token_fixture" "  $token_fixture  " $'\t'"$token_fixture"$'\r' \
+        "Bearer $token_fixture" "Authorization: Bearer $token_fixture" \
+        "apiToken: $token_fixture" "apiToken:$token_fixture" \
+        "\"$token_fixture\"" "'$token_fixture'" "Bearer \"$token_fixture\""; do
+        normalized=$(normalize_api_token_input "$token_input")
+        [[ "$normalized" == "$token_fixture" ]] || fail_test 'copy normalization changed the token'
+        valid_api_token "$normalized" || fail_test 'valid copied token was rejected'
+    done
+    long_token=$(printf '%0257d' 0)
+    for token_input in '' 'short' '***1234' '…1234' '••••1234' "$long_token" \
+        "${token_fixture:0:24} ${token_fixture:24}" \
+        "${token_fixture:0:24}"$'\t'"${token_fixture:24}" \
+        "${token_fixture:0:24}"$'\r'"${token_fixture:24}" \
+        "$token_fixture"$'\r\nInjected: header' "\"$token_fixture"; do
+        normalized=$(normalize_api_token_input "$token_input")
+        if valid_api_token "$normalized"; then fail_test 'invalid token or header injection was accepted'; fi
+    done
+
+    # Hidden input retries in place, preserves the secret, and does not export it.
+    (
+        export MAIN_API_TOKEN='inherited-token-must-not-be-used'
+        read_main_api_token
+        [[ "$MAIN_API_TOKEN" == "$token_fixture" ]] || fail_test 'retry did not read the fresh full token'
+        bash -c '[[ ! -v MAIN_API_TOKEN ]]' || fail_test 'main API token leaked to child environment'
+    ) > "${TEST_ROOT}/token-retry.log" 2>&1 <<< $'***1234\napiToken: '"$token_fixture"$' \r'
+    grep -Fq 'маскированное' "${TEST_ROOT}/token-retry.log" || fail_test 'masked token explanation missing'
+    grep -Fq 'Повторите ввод' "${TEST_ROOT}/token-retry.log" || fail_test 'token input did not retry'
+    if grep -Fq "$token_fixture" "${TEST_ROOT}/token-retry.log"; then fail_test 'main API token leaked into output'; fi
+    if (
+        die() { [[ -z "$MAIN_API_TOKEN" ]] || exit 91; exit 41; }
+        read_main_api_token
+    ) > "${TEST_ROOT}/token-eof.log" 2>&1 <<< 'invalid value'; then
+        fail_test 'EOF after invalid token was accepted'
+    else
+        [[ "$?" == 41 ]] || fail_test 'EOF did not stop safely with cleared token'
+    fi
+    printf 'PASS: 21 token normalization/rejection cases, retry, EOF, redacted output and non-exported secret.\n'
+)
+
+python3 - "${SCRIPT_DIR}/xui-node-docker.sh" <<'PY'
+import os, pty, select, subprocess, sys, time
+marker = 'Aa0Bb1Cc2Dd3Ee4Ff5Gg6Hh7Ii8Jj9Kk0Ll1Mm2Nn3Oo4Pp5'
+driver = '''source "$1"
+die() { printf 'STOP\\n'; exit 41; }
+read_main_api_token
+[[ "$MAIN_API_TOKEN" == Aa0Bb1Cc2Dd3Ee4Ff5Gg6Hh7Ii8Jj9Kk0Ll1Mm2Nn3Oo4Pp5 ]] || exit 91
+bash -c '[[ ! -v MAIN_API_TOKEN ]]' || exit 92
+printf 'TOKEN_INPUT_OK\\n'
+'''
+master, slave = pty.openpty()
+process = subprocess.Popen(['bash', '-c', driver, 'token-pty-test', sys.argv[1]],
+                           stdin=slave, stdout=slave, stderr=slave)
+os.close(slave)
+output = bytearray()
+sent = 0
+prompt = 'API-токен основной панели: '.encode()
+deadline = time.monotonic() + 10
+try:
+    while time.monotonic() < deadline:
+        if select.select([master], [], [], 0.1)[0]:
+            try:
+                data = os.read(master, 65536)
+            except OSError:
+                break
+            if not data:
+                break
+            output.extend(data)
+            if output.count(prompt) >= sent + 1:
+                payload = b'***1234\n' if sent == 0 else ('apiToken: ' + marker + ' \r').encode()
+                os.write(master, payload)
+                sent += 1
+        elif process.poll() is not None:
+            break
+    code = process.wait(timeout=2)
+    assert code == 0 and sent == 2 and b'TOKEN_INPUT_OK' in output, 'Hidden token prompt/retry failed'
+    assert marker.encode() not in output, 'Token echoed or logged by interactive prompt'
+finally:
+    if process.poll() is None:
+        process.kill()
+        process.wait()
+    os.close(master)
+print('PASS: real terminal hides the pasted token, retries masked input and handles Windows CR.')
+PY
+
+run_dns_fixture() (
+    trap - ERR
+    scenario="$1"
+    trace="${TEST_ROOT}/dns-${scenario}.trace"
+    : > "$trace"
+    die() { printf 'EXPECTED-STOP: %s\n' "$*" >&2; exit 41; }
+    cfg_get() {
+        case "$1" in
+            .domain) printf 'vbozarcz.giize.com' ;;
+            .publicIPv4) printf '45.151.183.66' ;;
+            *) exit 71 ;;
+        esac
+    }
+    detect_public_ipv4() {
+        if [[ "$scenario" == changed-ip ]]; then printf '45.151.183.67'; else printf '45.151.183.66'; fi
+    }
+    ip() {
+        [[ "$scenario" != aaaa-no-local-ipv6 ]] || return 0
+        printf '2: eth0 inet6 2001:db8::66/64 scope global\n'
+    }
+    dig() {
+        local resolver='' kind='' transport=udp arg status=NOERROR original
+        original=$(printf '%s\n' "$@")
+        for arg in "$@"; do
+            case "$arg" in
+                @*) resolver="${arg#@}" ;;
+                A|AAAA) kind="$arg" ;;
+                +tcp) transport=tcp ;;
+            esac
+        done
+        if [[ -z "$resolver" ]]; then
+            printf 'LOCAL\n' >> "$trace"
+            # Reproduce Ubuntu's local hostname/hosts answer from the report.
+            printf '127.0.1.1\n45.151.183.66\n'
+            return 0
+        fi
+        [[ "$resolver" == 1.1.1.1 || "$resolver" == 8.8.8.8 ]] || exit 72
+        for arg in -r -4 vbozarcz.giize.com. +nosearch +time=3 +tries=1; do
+            grep -Fxq -- "$arg" <<< "$original" || exit 73
+        done
+        printf '%s %s %s\n' "$resolver" "$kind" "$transport" >> "$trace"
+        if [[ "$scenario" == all-unavailable ||
+              ( "$scenario" == first-unavailable && "$resolver" == 1.1.1.1 ) ||
+              ( "$scenario" == udp-blocked && "$transport" == udp ) ||
+              ( "$scenario" == aaaa-timeout && "$kind" == AAAA ) ]]; then
+            return 9
+        fi
+        [[ "$scenario" != bad-header ]] || { printf 'unparseable DNS reply\n'; return 0; }
+        [[ "$scenario" != servfail ]] || status=SERVFAIL
+        if [[ "$scenario" == nxdomain || ( "$scenario" == aaaa-nxdomain && "$kind" == AAAA ) ]]; then status=NXDOMAIN; fi
+        printf ';; ->>HEADER<<- opcode: QUERY, status: %s, id: 1\n' "$status"
+        [[ "$status" == NOERROR ]] || return 0
+        if [[ "$scenario" == cname ]]; then
+            printf 'vbozarcz.giize.com. 120 IN CNAME node.example.com.\n'
+        fi
+        if [[ "$kind" == A ]]; then
+            [[ "$scenario" != missing-a ]] || return 0
+            if [[ "$scenario" == wrong-a || ( "$scenario" == resolver-disagreement && "$resolver" == 8.8.8.8 ) ]]; then
+                printf 'vbozarcz.giize.com. 120 IN A 45.151.183.67\n'
+            else
+                printf 'vbozarcz.giize.com. 120 IN A 45.151.183.66\n'
+                case "$scenario" in
+                    cname) printf 'node.example.com. 120 IN A 45.151.183.66\n' ;;
+                    public-loopback) printf 'vbozarcz.giize.com. 120 IN A 127.0.1.1\n' ;;
+                    extra-a) printf 'vbozarcz.giize.com. 120 IN A 45.151.183.67\n' ;;
+                esac
+            fi
+        else
+            case "$scenario" in
+                matching-aaaa|aaaa-no-local-ipv6) printf 'vbozarcz.giize.com. 120 IN AAAA 2001:db8:0:0::66\n' ;;
+                foreign-aaaa) printf 'vbozarcz.giize.com. 120 IN AAAA 2001:db8::67\n' ;;
+                malformed-aaaa) printf 'vbozarcz.giize.com. 120 IN AAAA not-an-ip\n' ;;
+            esac
+        fi
+    }
+    verify_dns
+    if grep -Fq LOCAL "$trace"; then fail_test "local resolver was used to approve public DNS"; fi
+)
+
+for dns_case in local-loopback cname udp-blocked first-unavailable matching-aaaa; do
+    if run_dns_fixture "$dns_case" > "${TEST_ROOT}/dns-${dns_case}.log" 2>&1; then
+        [[ "$dns_case" != udp-blocked ]] || grep -Fq tcp "${TEST_ROOT}/dns-${dns_case}.trace" || fail_test "DNS did not retry TCP"
+        [[ "$dns_case" != first-unavailable ]] || grep -Fq '8.8.8.8 AAAA' "${TEST_ROOT}/dns-${dns_case}.trace" || fail_test "DNS fallback did not verify AAAA"
+    else
+        cat "${TEST_ROOT}/dns-${dns_case}.log" >&2
+        fail_test "public DNS rejected valid fixture $dns_case"
+    fi
+done
+for dns_case in wrong-a public-loopback extra-a missing-a nxdomain all-unavailable aaaa-timeout servfail bad-header foreign-aaaa aaaa-no-local-ipv6 resolver-disagreement changed-ip aaaa-nxdomain malformed-aaaa; do
+    if run_dns_fixture "$dns_case" > "${TEST_ROOT}/dns-${dns_case}.log" 2>&1; then
+        fail_test "public DNS accepted unsafe/unverified fixture $dns_case"
+    else
+        [[ "$?" == 41 ]] || fail_test "unexpected DNS failure status for $dns_case"
+    fi
+    case "$dns_case" in
+        wrong-a|public-loopback|extra-a|missing-a|resolver-disagreement) dns_message='A-запись' ;;
+        nxdomain|aaaa-nxdomain) dns_message='NXDOMAIN' ;;
+        foreign-aaaa|aaaa-no-local-ipv6) dns_message='AAAA' ;;
+        changed-ip) dns_message='Публичный IPv4 изменился' ;;
+        *) dns_message='Не удалось проверить публичные A/AAAA' ;;
+    esac
+    grep -Fq "$dns_message" "${TEST_ROOT}/dns-${dns_case}.log" || fail_test "wrong DNS stop reason for $dns_case"
+done
+[[ ! -s "${TEST_ROOT}/dns-changed-ip.trace" ]] || fail_test "DNS queried after public IP changed"
+printf 'PASS: 20 public DNS cases: local loopback, CNAME, UDP/TCP, fallback, A/AAAA errors and resolver disagreement.\n'
 printf 'PASS: REALITY form, default JSON, token pipe, inbound names, LV1 profile, SSH/X11 and personal configuration checks.\n'
 if [[ "$TEST_MODE" == --regressions ]]; then
     bash -n "${SCRIPT_DIR}/xui-node-docker.sh"

@@ -3,6 +3,8 @@
 # Official runtime image is locked by digest; known release binaries are mounted read-only.
 # Pinned release: 3x-ui 3.7.0 with bundled Xray 26.7.28.
 # Revision 2026-10-03: REALITY form request, inbound display name and port guidance.
+# Revision 2026-10-13: verify public DNS independently of local hostname/hosts records.
+# Revision 2026-10-13: normalize pasted API token wrappers and retry invalid input safely.
 
 set +x
 set +a
@@ -546,30 +548,99 @@ create_or_load_config() {
     ok "Параметры узла сохранены с правами root-only."
 }
 
+query_public_dns() {
+    local resolver="$1" domain="$2" record_type="$3" transport response records result
+    # Never query the local stub: systemd-resolved can synthesize this VPS's
+    # A/AAAA records from its hostname or /etc/hosts (including 127.0.1.1).
+    # -r ignores ~/.digrc; a rooted name also avoids local search domains.
+    for transport in +notcp +tcp; do
+        if ! response=$(dig -r -4 "@$resolver" "${domain%.}." "$record_type" \
+            +time=3 +tries=1 +nosearch +noall +answer +comments "$transport" 2>/dev/null); then
+            continue
+        fi
+        if records=$(python3 - "$record_type" "$response" <<'PY'
+import ipaddress, re, sys
+kind, response = sys.argv[1:]
+status = re.search(r"^;; ->>HEADER<<-.*\bstatus: ([A-Z0-9]+),", response, re.M)
+if not status:
+    raise SystemExit(1)
+if status[1] == "NXDOMAIN":
+    raise SystemExit(2)
+if status[1] != "NOERROR":
+    raise SystemExit(1)
+try:
+    version = {"A": 4, "AAAA": 6}[kind]
+    addresses = set()
+    for line in response.splitlines():
+        fields = line.split()
+        if line.startswith(";") or len(fields) < 4 or fields[3] != kind:
+            continue
+        if len(fields) != 5 or fields[2] != "IN":
+            raise ValueError("Invalid DNS record")
+        address = ipaddress.ip_address(fields[4])
+        if address.version != version:
+            raise ValueError("Wrong address family")
+        addresses.add(address)
+    for address in sorted(addresses, key=int):
+        print(address)
+except (KeyError, ValueError):
+    raise SystemExit(1)
+PY
+        ); then
+            printf '%s' "$records"
+            return 0
+        else
+            result=$?
+            [[ "$result" != 2 ]] || return 2
+        fi
+    done
+    return 1
+}
+
 verify_dns() {
-    local domain expected current
+    local domain expected current resolver a_text aaaa_text result verified=0
     local -a a_records aaaa_records local_v6
     domain=$(cfg_get '.domain')
     expected=$(cfg_get '.publicIPv4')
     current=$(detect_public_ipv4) || die "Не удалось определить текущий публичный IPv4."
     [[ "$current" == "$expected" ]] || die "Публичный IPv4 изменился: ожидался $expected, сейчас $current. Проверьте сервер и DNS."
 
-    mapfile -t a_records < <(dig +short A "$domain" | awk '/^[0-9]+(\.[0-9]+){3}$/ {print}' | sort -u)
-    [[ ${#a_records[@]} -eq 1 && "${a_records[0]}" == "$expected" ]] || \
-        die "A-запись $domain должна содержать только публичный IPv4 этого сервера: $expected. Сейчас: ${a_records[*]:-(нет)}."
+    for resolver in 1.1.1.1 8.8.8.8; do
+        if a_text=$(query_public_dns "$resolver" "$domain" A); then
+            mapfile -t a_records < <(printf '%s\n' "$a_text" | sed '/^$/d')
+        else
+            result=$?
+            [[ "$result" != 2 ]] || die "Публичный DNS $resolver вернул NXDOMAIN для $domain: домен не найден. Проверьте A-запись и дождитесь обновления DNS."
+            warn "Публичный DNS $resolver не подтвердил A-запись $domain; проверяем другой DNS."
+            continue
+        fi
+        [[ ${#a_records[@]} -eq 1 && "${a_records[0]}" == "$expected" ]] || \
+            die "Публичный DNS $resolver: A-запись $domain должна содержать только IPv4 этого сервера: $expected. Сейчас: ${a_records[*]:-(нет)}."
 
-    mapfile -t aaaa_records < <(dig +short AAAA "$domain" | awk '/:/ {print}' | sort -u)
-    if (( ${#aaaa_records[@]} > 0 )); then
-        mapfile -t local_v6 < <(ip -6 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
-        (( ${#local_v6[@]} > 0 )) || die "У $domain есть AAAA-запись, но на сервере нет глобального IPv6. Удалите неправильную AAAA-запись."
-        python3 - "${aaaa_records[*]}" "${local_v6[*]}" <<'PY' || die "AAAA-запись домена не принадлежит этому серверу. Исправьте или удалите её."
+        if aaaa_text=$(query_public_dns "$resolver" "$domain" AAAA); then
+            mapfile -t aaaa_records < <(printf '%s\n' "$aaaa_text" | sed '/^$/d')
+        else
+            result=$?
+            [[ "$result" != 2 ]] || die "Публичный DNS $resolver вернул NXDOMAIN при проверке AAAA для $domain. Дождитесь согласованного обновления DNS."
+            warn "Публичный DNS $resolver не подтвердил AAAA для $domain; отсутствие записи не подтверждено. Проверяем другой DNS."
+            continue
+        fi
+        if (( ${#aaaa_records[@]} > 0 )); then
+            mapfile -t local_v6 < <(ip -6 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
+            (( ${#local_v6[@]} > 0 )) || die "У $domain есть публичная AAAA-запись (DNS $resolver), но на сервере нет глобального IPv6. Исправьте или удалите AAAA-запись."
+            python3 - "${aaaa_records[*]}" "${local_v6[*]}" <<'PY' || die "Публичная AAAA-запись домена (DNS $resolver) не принадлежит этому серверу. Исправьте или удалите её."
 import ipaddress, sys
 dns = {ipaddress.ip_address(v) for v in sys.argv[1].split()}
 local = {ipaddress.ip_address(v) for v in sys.argv[2].split()}
 raise SystemExit(0 if dns and dns <= local else 1)
 PY
-    fi
-    ok "DNS проверен: $domain указывает на $expected."
+        fi
+        verified=$((verified + 1))
+        ok "Публичный DNS $resolver: A/AAAA для $domain проверены."
+    done
+    (( verified > 0 )) || die "Не удалось проверить публичные A/AAAA для $domain через 1.1.1.1 и 8.8.8.8. Проверьте исходящий доступ UDP/TCP 53; локальный DNS не используется как подтверждение."
+    (( verified == 2 )) || warn "Публичный DNS подтверждён одним резолвером; второй недоступен или не завершил проверку A/AAAA."
+    ok "Публичный DNS проверен: $domain указывает на $expected."
 }
 
 provider_firewall_checkpoint() {
@@ -816,10 +887,75 @@ wait_for_panel() {
 }
 
 
+valid_api_token() {
+    # This is a header-safety check, not authentication or an admin-scope check.
+    [[ "$1" =~ ^[A-Za-z0-9_-]{20,256}$ ]]
+}
+
+normalize_api_token_input() {
+    # Bash builtins only: no secret in an external process's argv/environment.
+    # Only trim boundary whitespace and recognized single-line copy wrappers;
+    # preserve the token itself, including case and any internal characters.
+    local value="$1" whitespace=$' \t\r\n'
+    value="${value#"${value%%[!$whitespace]*}"}"
+    value="${value%"${value##*[!$whitespace]}"}"
+    case "$value" in
+        'Authorization: Bearer '*) value="${value#'Authorization: Bearer '}" ;;
+        'Bearer '*) value="${value#'Bearer '}" ;;
+        apiToken:*) value="${value#apiToken:}" ;;
+    esac
+    value="${value#"${value%%[!$whitespace]*}"}"
+    value="${value%"${value##*[!$whitespace]}"}"
+    case "$value" in
+        \"*\"|\'*\') value="${value:1:${#value}-2}" ;;
+    esac
+    value="${value#"${value%%[!$whitespace]*}"}"
+    value="${value%"${value##*[!$whitespace]}"}"
+    printf '%s' "$value"
+}
+
+read_main_api_token() {
+    local normalized='' length
+    export -n normalized 2>/dev/null || true
+    unset MAIN_API_TOKEN
+    MAIN_API_TOKEN=''
+    printf 'Вставьте полное значение токена, показанное при создании в основной панели; область — admin.\n'
+    printf 'Ввод скрыт. Для отмены нажмите Ctrl+C.\n'
+    while true; do
+        if ! IFS= read -r -s -p 'API-токен основной панели: ' MAIN_API_TOKEN; then
+            MAIN_API_TOKEN=''
+            normalized=''
+            printf '\n'
+            die 'Ввод API-токена прерван; запрос регистрации не отправлен.'
+        fi
+        printf '\n'
+        normalized=$(normalize_api_token_input "$MAIN_API_TOKEN")
+        if valid_api_token "$normalized"; then
+            [[ "$MAIN_API_TOKEN" == "$normalized" ]] || info 'Убраны крайние пробелы/CR или подпись при копировании; значение токена сохранено.'
+            MAIN_API_TOKEN="$normalized"
+            normalized=''
+            return 0
+        fi
+        length=${#normalized}
+        if [[ "$normalized" == *'*'* || "$normalized" == *'…'* || "$normalized" == *'•'* ]]; then
+            warn 'Вставлено маскированное или сокращённое значение. Нужен полный токен, показанный при его создании.'
+        elif [[ -z "$normalized" ]]; then
+            warn 'Токен не введён. Вставьте его полное значение или отмените ввод через Ctrl+C.'
+        elif [[ "$normalized" == *[!A-Za-z0-9_-]* ]]; then
+            warn 'Во введённом значении есть недопустимые символы или внутренние пробелы. Вставьте только полный API-токен.'
+        else
+            warn "Длина введённого значения — $length; ожидаются 20–256 символов. В 3x-ui 3.7.0 полный токен содержит 48 символов."
+        fi
+        MAIN_API_TOKEN=''
+        normalized=''
+        warn 'Запрос не отправлен. Повторите ввод в этом окне; перезапуск установки не требуется.'
+    done
+}
+
 api_call() {
     local token="$1" method="$2" url="$3" body_file="${4:-}" resolve="${5:-}" content_type="${6:-application/json}"
     local header_fd response_file code curl_rc=0
-    [[ "$token" =~ ^[A-Za-z0-9_-]{20,256}$ ]] || { err "Некорректный формат API-токена."; return 2; }
+    valid_api_token "$token" || { err "Некорректный формат API-токена."; return 2; }
     response_file=$(mktemp /run/xui-node-docker.response.XXXXXX)
     chmod 0600 "$response_file"
     # A pipe descriptor, not argv or a file on disk (also for the main token).
@@ -1369,10 +1505,8 @@ register_with_main_panel() {
     ensure_main_panel_base
 
     printf '\nДля финальной регистрации нужен API-токен основной панели с областью admin.\n'
-    printf 'Он будет прочитан скрыто, использован только в памяти и сразу удалён из переменной.\n'
-    read -rsp "API-токен основной панели: " MAIN_API_TOKEN
-    printf '\n'
-    [[ "$MAIN_API_TOKEN" =~ ^[A-Za-z0-9_-]{20,256}$ ]] || die "Некорректный формат токена; запрос не отправлен."
+    printf 'Он будет прочитан скрыто, использован только в памяти и удалён при завершении.\n'
+    read_main_api_token
 
     local list duplicates exact_count exact_id payload response remote_inbounds node_id probe verify
     list=$(main_api_call GET /nodes/list) || die "Основная панель недоступна или токен не имеет области admin. Узел не зарегистрирован."
